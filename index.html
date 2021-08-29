@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.1.1/socket.io.js"></script>
+    <title>Itsachat - Version 1.0</title>
+</head>
+<body>
+    <!-- Main application -->
+    <nav>
+        <ul id="rooms">
+        </ul>
+        <button id="roommenu">+</button>
+    </nav>
+    <main class="clearfix">
+        <div id="chat"></div>
+        <div id="users"></div>
+    </main>
+    <form id="messageform" action="" class="clearfix">
+        <button type="button" id="nickbutton" title="Current Nickname">
+            <span class="oi oi-person" aria-hidden="true"></span>
+        </button>
+        <input id="chatmessage"/>
+        <button>Send</button>
+    </form>
+
+    <!-- Room picker Dialog -->
+    <div id="room-picker" class="dialog hidden">
+        <div class="rooms">
+
+        </div>
+        <div class="input">
+            <input id="roomname"/>
+            <button id="joinroom">Join</button>
+        </div>
+    </div>
+
+    <!-- Nickname Dialog -->
+    <div id="nickname-picker" class="dialog hidden">
+        <form action="">
+            <div class="fields">
+                <label>Username</label><input name="nickname" placeholder="New nickname" required="true"><br/>
+                <label>Password</label><input name="password" type="password" placeholder="..."><br/>
+            </div>
+            <button type="submit">Change Nickname</button>
+            <button type="button">Register</button>
+        </form>
+    </div>
+    <script>
+        /* Internet Explorer check */
+        (function(){
+            var ua = window.navigator.userAgent;
+            var msie = ua.indexOf("MSIE ");
+
+            if (msie > 0 || !!navigator.userAgent.match(/Trident.*rv\:11\./)) {
+                /* Change the page to show a notice that Internet Explorer is no longer supported*/
+                document.body.innerHTML = "<div style='margin: auto; max-width: 900px; font-family: sans-serif'>" + 
+                    "<h1 style='font-size:26px'>Internet Explorer is no longer a supported browser</h1>" + 
+                    "<h2>Please download a modern web browser to continue using this web application.</h2>" + 
+                    "<p>Since the end of 2015 Microsoft has decided to stop providing new features for the Internet Explorer series of browsers. " +
+                    "Due to the sizable development costs of supporting a browser that is no longer compliant with current web standards we have decided " +
+                    "to discontinue support for Internet Explorer entirely</p>" +
+                    "<p>Please feel free to download any modern web browser to continue using the web with all it's amazing features. Below you can find " +
+                    "a short list of our favourites, though this is by no means an exhaustive list of supported browsers</p>" +
+                    "<ul><li><a href='https://www.google.com/chrome/'>Google Chrome</a></li>" +
+                    "<li><a href='https://www.mozilla.org/firefox/'>Mozilla Firefox</a></li>" +
+                    "<li><a href='https://www.opera.com'>Opera</a></li></ul>" +
+                    "<p>Thank you for using our products</p><p><i>The development team</i></p></div>";
+                throw new Error("Internet Explorer detected, stopping all scripts");
+            }
+        })();
+
+        /* Form parser, slightly modified from https://code.google.com/archive/p/form-serialize/ */
+        function formParser(e){if(e&&"FORM"===e.nodeName){var s,t=[];for(q={},s=e.elements.length-1;0<=s;s-=1)if(""!==e.elements[s].name)switch(e.elements[s].nodeName){case"INPUT":switch(e.elements[s].type){case"text":case"hidden":case"password":case"button":case"reset":case"submit":q[e.elements[s].name]=e.elements[s].value;break;case"checkbox":case"radio":e.elements[s].checked&&(q[e.elements[s].name]=e.elements[s].value)}break;case"TEXTAREA":q[e.elements[s].name]=e.elements[s].value;break;case"SELECT":switch(e.elements[s].type){case"select-one":q[e.elements[s].name]=e.elements[s].value;break;case"select-multiple":for(t=e.elements[s].options.length-1;0<=t;t-=1)e.elements[s].options[t].selected&&(q[e.elements[s].name]=e.elements[s].options[t].value)}}return q}}
+
+        /* ================== */
+        /* Object definitions */
+        /* ================== */
+
+        var ChatUser = function(sid, nickname) {
+            this.sid = sid;
+            this.nickname = nickname;
+        }
+
+        var ChatMessage = function(text, user) {
+            this.user = user;
+            this.text = text;
+        }
+        
+        var ChatRoom = function(roomName) {
+            this.roomName = roomName;
+            this.messages = [new ChatMessage('*** You have joined room #' + roomName)];
+            this._users = {};
+        }
+
+        ChatRoom.prototype.pushMessage = function(chatMessage) {
+            this.messages.push(chatMessage);
+        }
+
+        ChatRoom.prototype.addUser = function(user) {
+            this._users[user.sid] = user;
+        }
+
+        ChatRoom.prototype.removeUser = function(user) {
+            for (var key in this._users ) {
+                if ( key == user.sid ) {
+                    delete this._users[key];
+                    break;
+                }
+            }
+        }
+
+        ChatRoom.prototype.getUser = function(sid) {
+            return this._users[sid];
+        }
+
+        ChatRoom.prototype.updateUser = function(user) {
+            this._users[user.sid] = user;
+        }
+
+        ChatRoom.prototype.getUserList = function() {
+            var returnList = [];
+            for (var key in this._users ) {
+                returnList.push(this._users[key]);
+            }
+            return returnList;
+        }
+
+        /* ================== */
+        /* Application starts */
+        /* ================== */
+
+        var debugMode = 1;
+        var chatRooms = [];
+        var currentRoom = '';
+        var my_sid = '';
+        var currentNick = '';
+        var chatElement = document.getElementById('chat');
+        var userElement = document.getElementById('users');
+
+        /* Connect to the SocketIO server that serves the page */
+        var socket = io();
+        socket.emit('join room', {room: 'main'});
+
+        /* Displays a chat message on the active chat element */
+        var displayChatMessage = function(chatMessage) {
+            var line = document.createElement('p');
+            if ( chatMessage.user === undefined ) {
+                line.innerText = chatMessage.text;
+            }
+            else {
+                var uname = document.createElement('span');
+                var text = document.createElement('span');
+                uname.classList.add('username');
+                uname.innerText = chatMessage.user;
+                text.innerText = chatMessage.text;
+                line.appendChild(uname);
+                line.appendChild(text);
+            }
+            chatElement.appendChild(line);
+            chatElement.scrollBy(0, line.clientHeight);
+        }
+
+        /* Adds a chat message to a chat log */
+        var addChatMessage = function(chatMessage, roomName) {
+            chatRooms.forEach(function(log){
+                if ( log.roomName == roomName ) {
+                    log.messages.push(chatMessage);
+                    if ( roomName == currentRoom ) {
+                        displayChatMessage(chatMessage);
+                    }
+                }
+            });
+        }
+
+        /* Switch the currently selected room */
+        var switchRoom = function(newRoom) {
+            var thisChat;
+            chatRooms.forEach(function(room){
+                if ( room.roomName == newRoom ) {
+                    thisChat = room;
+                }
+            });
+
+            if ( thisChat === undefined ) {
+                return;
+            }
+
+            if ( debugMode > 0 ) 
+                console.log('Switching to room ' + newRoom);
+
+            var roomButton = null;
+            /* Set the right room button to active */
+            var roomNodes = document.getElementById('rooms').childNodes;
+            for (var t = 1; t < roomNodes.length; t++) {
+                if ( 'roomname' in roomNodes[t].dataset ) {
+                    if ( roomNodes[t].dataset.roomname == newRoom ) {
+                        roomButton = roomNodes[t].lastChild; /* incidentally pick up the relevant room button */
+                    }
+                }
+                roomNodes[t].lastChild.classList.remove('active');
+            }
+
+            roomButton.classList.add('active');
+
+            /* Clean up existing elements and create new HTML for this room */
+            while ( chatElement.lastChild ) {
+                chatElement.removeChild(chatElement.lastChild);
+            }
+
+            while ( userElement.lastChild ) {
+                userElement.removeChild(userElement.lastChild);
+            }
+
+            thisChat.messages.forEach(function(chatMessage){
+                displayChatMessage(chatMessage);
+            });
+
+            thisChat.getUserList().forEach(function(user) {
+                var li = document.createElement('li');
+                li.innerText = user.nickname;
+                li.dataset.id = user.sid;
+                userElement.appendChild(li);
+            });
+            
+            currentRoom = newRoom;
+        }
+
+        /* ======================== */
+        /* Respond to Socket Events */
+        /* ======================== */
+
+        socket.on('connected', function(msg){
+            if ( debugMode > 0 ) {
+                console.log('Received: connected');
+                console.log(msg);
+            }
+
+            my_sid = msg.my_sid;
+            currentNick = msg.nickname;
+        });
+
+        socket.on('joined room', function(msg){
+            if ( debugMode > 0 ) {
+                console.log('Received: joined room ');
+                console.log(msg);
+            }
+
+            var li = document.createElement('li');
+            var but = document.createElement('button');
+            var roomname = msg.room;
+            li.dataset.roomname = roomname;
+            but.innerText = '#' + roomname;
+            but.onclick = function() {
+                switchRoom(roomname, but);
+            };
+
+            li.appendChild(but);
+            document.getElementById('rooms').appendChild(li);
+
+            /* Set up internal data*/
+            var newChat = new ChatRoom(roomname)
+            newChat.pushMessage(new ChatMessage('*** Topic is: ' + msg.topic));
+            msg.users.forEach(function(user) {
+                newChat.addUser(user);
+            });
+
+            chatRooms.push(newChat);
+            switchRoom(roomname);
+        });
+
+        socket.on('user joined room', function(msg) {
+            if ( debugMode > 0 ) {
+                console.log('Received: user joined room');
+                console.log(msg);
+            }
+
+            addChatMessage(new ChatMessage('User ' + msg.user.nickname  + ' joined Room'), msg.room);
+
+            chatRooms.forEach(function(room){
+                if ( room.roomName == msg.room ) {
+                    if ( room.getUser(msg.user.sid) === undefined ) {
+                        room.addUser(msg.user);
+
+                        if ( msg.room == currentRoom) {
+                            var li = document.createElement('li');
+                            li.innerText = msg.user.nickname;
+                            li.dataset.id = msg.user.sid;
+                            userElement.appendChild(li);
+                        }
+                    }
+                }
+            });
+        })
+
+        socket.on('user left room', function(msg) {
+            if ( debugMode > 0 ) {
+                console.log('Received: user left room');
+                console.log(msg);
+            }
+
+            if ( msg.sid == my_sid ) {
+                /* We're the one leaving a room*/
+                /* TODO: Clean up the room */
+                return;
+            }
+
+            addChatMessage(new ChatMessage('User ' + msg.user.nickname  + ' left Room'), msg.room);
+
+            chatRooms.forEach(function(room){
+                if ( room.roomName == msg.room ) {
+                    var userList = room.getUserList();
+                    for (var t = 0; t < userList.length; t++) {
+                        if ( userList[t].sid === msg.user.sid ) {
+                            room.removeUser(userList[t])
+                            break;
+                        }
+                    }
+
+                    var userNodes = userElement.childNodes;
+                    if ( userNodes.length > 1 ) {
+                        userNodes.forEach(function(node) {
+                            if ( node.dataset !== undefined ) {
+                                if ('id' in node.dataset ) {
+                                    if ( node.dataset.id === msg.user.sid ) {
+                                        userElement.removeChild(node);
+                                    }
+                                }
+                            }
+                        })
+                    }
+                }
+            });
+        });
+
+        socket.on('user changed nickname', function(msg) {
+            if ( debugMode > 0 ) {
+                console.log('Received: user changed nickname');
+                console.log(msg);
+            }
+            
+            chatRooms.forEach(function(room) {
+                var user = room.getUser(msg.sid);
+                if ( user !== undefined ) {
+                    var oldnick = user.nickname;
+                    if ( oldnick !== msg.nickname ) {
+                        user.nickname = msg.nickname;
+                        room.updateUser(user);
+
+                        if ( msg.sid != my_sid )
+                            addChatMessage(new ChatMessage(oldnick + ' changed their nickname to ' + msg.nickname), room.roomName);
+                        else
+                            addChatMessage(new ChatMessage('You have changed your nickname to ' + msg.nickname), room.roomName);
+
+                        /* Force a reconstruct if this is the current room*/
+                        if ( room.roomName === currentRoom )
+                            switchRoom(currentRoom); 
+                    }
+                }
+            });
+        });
+
+        socket.on('chat message', function(msg) {
+            if ( debugMode > 0 ) {
+                console.log('Received: chat message');
+                console.log(msg);
+            }
+
+            var chatMessage = new ChatMessage(msg.text, msg.nickname);
+            addChatMessage(chatMessage, msg.room);
+        });
+
+        socket.on('room list', function(msg) {
+            if ( debugMode > 0 ) {
+                console.log('Received: room list');
+                console.log(msg);
+            }
+
+            var roomlist = document.getElementById('room-picker').childNodes[1];
+            var roomNodes = roomlist.childNodes;
+            msg.forEach(function(room) {
+                var existing = undefined;
+                
+                if ( roomNodes.length > 1 ) {
+                    roomNodes.forEach(function(node){
+                        if ( node.dataset !== undefined ) {
+                            if ('roomname' in node.dataset ) {
+                                if ( node.dataset.roomname == room.room ) {
+                                    existing = node;
+                                }
+                            }
+                        }
+                    });
+                }
+
+                if ( existing === undefined) {
+                    /* Create new elements */
+                    var li = document.createElement('li');
+                    var roomEl = document.createElement('span');
+                    var usersEl = document.createElement('span');
+
+                    roomEl.classList.add('name');
+                    roomEl.innerText = '#' + room.room;
+                    roomEl.title = room.topic;
+                    usersEl.classList.add('users');
+                    usersEl.innerText = '' + room.users + ' Users';
+                    li.classList.add('clearfix')
+                    li.dataset.roomname = room.room;
+                    li.appendChild(roomEl);
+                    li.appendChild(usersEl);
+                    roomlist.appendChild(li);
+
+                    li.onclick = function() {
+                        socket.emit('join room', {room: room.room}); /* Such Room, much wow */
+                        document.getElementById('room-picker').classList.add('hidden');
+                    }
+                }
+                else {
+                    existing.lastChild.innerText = '' + room.users + ' Users';
+                }
+            });
+        });
+
+        /* ===================== */
+        /* Application Interface */
+        /* ===================== */
+
+        document.getElementById('messageform').onsubmit = function() {
+            var message = document.getElementById('chatmessage').value;
+            if ( message.length < 1 )
+                return false;
+
+            if ( debugMode > 0 ) 
+                console.log('Sending message: ' + message)
+
+            socket.emit('chat message', {'text': message, 'room': currentRoom});
+            document.getElementById('chatmessage').value = '';
+            document.getElementById('chatmessage').focus();
+            return false;
+        }
+
+        document.getElementById('roommenu').onclick = function() {
+            var picker = document.getElementById('room-picker');
+            picker.classList.toggle('hidden');
+
+            if ( !picker.classList.contains('hidden') ) {
+                socket.emit('list rooms');
+            }
+            else {
+                document.getElementById('chatmessage').focus();
+            }
+        }
+
+        document.getElementById('joinroom').onclick = function() {
+            var roomEl = document.getElementById('roomname');
+            if ( roomEl.value.length > 0 ) {
+                socket.emit('join room', {room: roomEl.value});
+                document.getElementById('room-picker').classList.add('hidden');
+                document.getElementById('chatmessage').focus();
+            }
+        }
+
+        document.getElementById('nickbutton').onclick = function() {
+            var picker = document.getElementById('nickname-picker');
+            picker.classList.toggle('hidden');
+            
+            if ( picker.classList.contains('hidden') )
+                document.getElementById('chatmessage').focus();
+            else
+                document.querySelector('#nickname-picker input[name="nickname"]').focus();
+        }
+
+        document.getElementById('nickname-picker').children[0].onsubmit = function(payload) {
+            var formData = formParser(payload.target);
+            if ( debugMode > 0 )
+                console.log(formData);
+
+            socket.emit('change nickname', {nickname: formData.nickname, password: formData.password});
+
+            formData = undefined;
+            payload.target.reset();
+            document.getElementById('nickname-picker').classList.add('hidden');
+            document.getElementById('chatmessage').focus();
+            return false;
+        }
+
+    </script>
+    <style>
+        * { box-sizing: border-box; font-family: inherit; font-size: inherit;}
+        html { font-family: "Roboto", Sans-serif; font-size: 15px; }
+        body { margin: auto; padding: 0; overflow: hidden; }
+        button { background: none; border: 1px solid #000; padding: 5px 15px; }
+        button:hover { background-color: #dadada; }
+        button.active { background-color: #def; font-weight: bold; }
+        button.active:hover { background-color: #adf; }
+        button.primary { border-width: 2px; }
+
+        form input { border: none; padding: 5px; }
+        form .fields { border: 0.5px solid #000; margin-bottom: 5px; padding: 5px; }
+        form .fields label { margin-bottom: 5px; display: inline-block; }
+        form .fields label:last-of-type { margin-bottom: auto; }
+
+        nav { position: relative; padding: 5px; width: 100%; }
+        nav ul { margin: auto; padding: 0; display: inline-block; }
+        nav ul li { display: inline-block; text-transform: uppercase; position: relative; }
+        nav ul li:not(:last-child) { margin-right: 4px; }
+        nav ul li .close { position: absolute; right: 2px; top: 2px; color: #f00; }
+        button#roommenu { background-color: #afa; font-weight: bold; display: inline-block; }
+        button#roommenu:hover { background-color: #5d5;}
+
+        main { height: 80vh; position: relative; display: block; }
+        #chat { clear: left; float: left; width: calc(100% - 240px); border: 1px solid #000; height: 100%; padding: 15px; font-family: monospace; 
+            overflow-y: scroll; }
+
+        #chat p { margin: auto; }
+        span.username { color: #999; }
+        span.username::before { content: '<'; }
+        span.username::after { content: '> '; }
+        #users { float: left; width: 240px; font-family: monospace; padding: 15px; height: 100%; border: 1px solid #000; border-left: none; }
+        #users li { list-style: none; }
+        #users li:nth-child(2n) { background-color: #efefef; }
+
+        #messageform { position: relative; width: 100%; padding: 5px; border-bottom: 1px solid #000; border-left: 1px solid #000; }
+        #messageform input { width: calc(100% - 140px); float: left; }
+        #messageform button { width: 90px; margin-left: 5px; float: left; }
+        #messageform #nickbutton { width: 35px; margin-left: 0; margin-right: 5px; text-overflow: ellipsis; padding: 5px; }
+
+        .clearfix::after { content: ""; display: block; clear: both; }
+        .dialog { display: block; opacity: 1; transition: 0.2s opacity ease-in-out; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            background-color: #fff; border: 0.5px solid #000; padding: 5px; }
+
+        .hidden { pointer-events: none; opacity: 0; }
+
+        .rooms { border: 1px solid #000; margin-bottom: 5px; }
+        .rooms li { list-style: none; width: 100%; position: relative; cursor: pointer; padding: 5px; font-family: monospace; }
+        .rooms li:hover { background-color: #adf; }
+        .rooms li .name { float: left; width: calc(100% - 80px); text-overflow: ellipsis; }
+        .rooms li .users { float: left; width: 80px; text-align: right; }
+        #room-picker input { padding: 5px; border: 1px solid #000; }
+
+        #nickname-picker label { width: 80px; }
+
+        @media only screen and (max-width: 639px) {
+            #chat { width: 100%; }
+            #users { float: none; position: absolute; left: 100%; top: 0; }
+            .dialog { left: 15px; transform: none; right: 15px; top: 45px; }
+        }
+    </style>
+    <link href="https://fonts.googleapis.com/css?family=Roboto:400,700" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/open-iconic/1.1.1/font/css/open-iconic-bootstrap.min.css" rel="stylesheet">
+</body>
+</html>
